@@ -98,6 +98,8 @@ npm run dev
 
 ## Команды Telegram
 
+Бот можно использовать полностью внутри Telegram без ручного ввода slash-команд: после `/start` появляется reply-клавиатура с действиями (Help/Status/Watchlist/Find whales и т.д.), а бот сам запрашивает нужные адреса/mint в диалоге.
+
 ```text
 /watch <address> <name>
 /unwatch <address>
