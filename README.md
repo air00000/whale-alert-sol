@@ -19,6 +19,7 @@ whale-alert-sol/
 ├── README.md
 ├── requirements.txt
 ├── data/
+├── src/                  # legacy Node.js tree (transition only)
 └── pybot/
     ├── __init__.py
     ├── main.py
@@ -79,3 +80,7 @@ python -m pybot.main
 ```
 
 После `/start` можно работать полностью через кнопки в самом Telegram.
+
+## Переходный режим для PR-совместимости
+
+Чтобы избежать merge-конфликтов с ветками, где ещё идут изменения в `src/*.js`, legacy Node.js файлы временно оставлены в репозитории, но целевой рантайм проекта — Python (`pybot/*`).

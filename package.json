@@ -1,0 +1,20 @@
+{
+  "name": "whale-alert-sol",
+  "version": "0.1.1",
+  "description": "Telegram bot for Solana memecoin whale discovery, wallet analytics, clustering, and monitoring",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.98.4",
+    "dotenv": "^16.4.7",
+    "grammy": "^1.41.1",
+    "ws": "^8.20.0"
+  }
+}
