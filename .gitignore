@@ -7,3 +7,6 @@ yarn-error.log*
 coverage/
 data/*.json
 data/*.tmp
+
+__pycache__/
+*.pyc

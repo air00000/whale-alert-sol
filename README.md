@@ -59,10 +59,12 @@ whale-alert-sol/
 
 ## Быстрый старт
 
-### 1) Установка
+### 1) Установка (Python)
 
 ```bash
-npm install
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
 ### 2) Конфиг
@@ -87,16 +89,12 @@ JUPITER_API_KEY=...
 ### 3) Запуск
 
 ```bash
-npm start
-```
-
-Для разработки:
-
-```bash
-npm run dev
+python -m pybot.main
 ```
 
 ## Команды Telegram
+
+Бот можно использовать полностью внутри Telegram без ручного ввода slash-команд: после `/start` появляется reply-клавиатура с кнопками (`Помощь`, `Статус`, `Найти китов`, `Киты по токену`, и т.д.), а бот сам запрашивает нужные адреса/mint в диалоге.
 
 ```text
 /watch <address> <name>
