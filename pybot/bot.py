@@ -6,16 +6,13 @@ from datetime import datetime, timezone
 
 from telegram import ReplyKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-from .config import Settings
-from .storage import JsonStorage
+from .cluster_analyzer import ClusterAnalyzer
+from .helius import HeliusClient
+from .wallet_analyzer import WalletAnalyzer
+from .whale_finder import WhaleFinder
+from .whale_tracker import WhaleTracker
 
 ADDRESS_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,48}$")
 
@@ -39,10 +36,18 @@ class PendingInput:
     action: str
 
 
+@dataclass
+class Services:
+    helius: HeliusClient
+    wallet_analyzer: WalletAnalyzer
+    whale_finder: WhaleFinder
+    cluster_analyzer: ClusterAnalyzer
+    tracker: WhaleTracker
+
+
 class WhaleBot:
-    def __init__(self, settings: Settings, storage: JsonStorage) -> None:
-        self.settings = settings
-        self.storage = storage
+    def __init__(self, services: Services) -> None:
+        self.services = services
 
     @staticmethod
     def main_menu() -> ReplyKeyboardMarkup:
@@ -67,15 +72,16 @@ class WhaleBot:
         await self.start(update, context)
 
     async def ping(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.effective_message.reply_text("✅ Pong")
+        await update.effective_message.reply_text("✅ Pong", reply_markup=self.main_menu())
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        helius = "yes" if self.settings.helius_api_key else "no"
-        watch_count = len(self.storage.list_watchlist(update.effective_chat.id))
+        health = self.services.helius.health_check()
+        watch_count = len(self.services.tracker.list_watchlist(update.effective_chat.id))
         now = datetime.now(timezone.utc).isoformat()
         text = (
             "<b>Runtime status</b>\n"
-            f"Helius configured: <b>{helius}</b>\n"
+            f"Helius configured: <b>{'yes' if self.services.helius.is_configured else 'no'}</b>\n"
+            f"Helius health: <b>{'ok' if health.get('ok') else 'degraded'}</b>\n"
             f"Watched wallets: <b>{watch_count}</b>\n"
             f"Time (UTC): <code>{now}</code>"
         )
@@ -88,24 +94,17 @@ class WhaleBot:
             await self._add_watch(update, address, name)
             return
         context.chat_data["pending"] = PendingInput("watch")
-        await update.effective_message.reply_text(
-            "Отправь: <code>address name</code>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=self.cancel_menu(),
-        )
+        await update.effective_message.reply_text("Отправь: <code>address name</code>", parse_mode=ParseMode.HTML, reply_markup=self.cancel_menu())
 
     async def unwatch(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if context.args:
             await self._remove_watch(update, context.args[0])
             return
         context.chat_data["pending"] = PendingInput("unwatch")
-        await update.effective_message.reply_text(
-            "Отправь адрес кошелька для удаления.",
-            reply_markup=self.cancel_menu(),
-        )
+        await update.effective_message.reply_text("Отправь адрес кошелька для удаления.", reply_markup=self.cancel_menu())
 
     async def list_watch(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        items = self.storage.list_watchlist(update.effective_chat.id)
+        items = self.services.tracker.list_watchlist(update.effective_chat.id)
         if not items:
             await update.effective_message.reply_text("Вотчлист пуст.", reply_markup=self.main_menu())
             return
@@ -115,22 +114,46 @@ class WhaleBot:
         await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=self.main_menu())
 
     async def score(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._address_stub(update, context, "score")
+        if context.args:
+            await self._show_score(update, context.args[0])
+            return
+        context.chat_data["pending"] = PendingInput("score")
+        await update.effective_message.reply_text("Отправь адрес кошелька для score.", reply_markup=self.cancel_menu())
 
     async def holdings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._address_stub(update, context, "holdings")
+        if context.args:
+            await self._show_holdings(update, context.args[0])
+            return
+        context.chat_data["pending"] = PendingInput("holdings")
+        await update.effective_message.reply_text("Отправь адрес кошелька для holdings.", reply_markup=self.cancel_menu())
 
     async def cluster(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._address_stub(update, context, "cluster")
+        if context.args:
+            await self._show_cluster(update, context.args[0])
+            return
+        context.chat_data["pending"] = PendingInput("cluster")
+        await update.effective_message.reply_text("Отправь seed-адрес для cluster анализа.", reply_markup=self.cancel_menu())
 
     async def findbytoken(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await self._address_stub(update, context, "findbytoken")
+        if context.args:
+            await self._show_token_whales(update, context.args[0])
+            return
+        context.chat_data["pending"] = PendingInput("findbytoken")
+        await update.effective_message.reply_text("Отправь mint токена.", reply_markup=self.cancel_menu())
 
     async def findwhales(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.effective_message.reply_text(
-            "Сканирование китов включено в Python-версии как следующий шаг. Базовый Telegram UX уже работает.",
-            reply_markup=self.main_menu(),
-        )
+        result = self.services.whale_finder.find_whales()
+        whales = result["whales"]
+        lines = [
+            "<b>Whale scan</b>",
+            f"Scanned wallets: {result['scanned_wallets']}",
+            f"Filters: winRate>={result['filters']['min_win_rate']} pnl>={result['filters']['min_pnl_usd']}"
+        ]
+        if not whales:
+            lines.append("По текущим фильтрам китов не найдено.")
+        for i, w in enumerate(whales[:10], start=1):
+            lines.append(f"{i}. <code>{w['address']}</code> | score {w['score']} | winRate {w['win_rate']}% | pnl ${w['all_time_pnl_usd']}")
+        await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=self.main_menu())
 
     async def text_router(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = (update.effective_message.text or "").strip()
@@ -147,94 +170,120 @@ class WhaleBot:
                 if not parts:
                     await update.effective_message.reply_text("Нужен адрес.")
                     return
-                address = parts[0]
-                name = " ".join(parts[1:]).strip() or address
-                await self._add_watch(update, address, name)
+                await self._add_watch(update, parts[0], " ".join(parts[1:]).strip() or parts[0])
             elif pending.action == "unwatch":
                 await self._remove_watch(update, text)
-            else:
-                await self._handle_stub_action(update, pending.action, text)
+            elif pending.action == "score":
+                await self._show_score(update, text)
+            elif pending.action == "holdings":
+                await self._show_holdings(update, text)
+            elif pending.action == "cluster":
+                await self._show_cluster(update, text)
+            elif pending.action == "findbytoken":
+                await self._show_token_whales(update, text)
 
             context.chat_data.pop("pending", None)
             return
 
-        by_text = {
+        direct = {
             MENU["help"]: self.help,
             MENU["status"]: self.status,
             MENU["list"]: self.list_watch,
-            MENU["watch"]: None,
-            MENU["unwatch"]: None,
-            MENU["score"]: None,
-            MENU["holdings"]: None,
-            MENU["cluster"]: None,
             MENU["findwhales"]: self.findwhales,
-            MENU["findbytoken"]: None,
         }
-
-        if text in by_text and by_text[text] is not None:
-            await by_text[text](update, context)
+        if text in direct:
+            await direct[text](update, context)
             return
 
-        if text == MENU["watch"]:
-            context.chat_data["pending"] = PendingInput("watch")
-            await update.effective_message.reply_text("Отправь: <code>address name</code>", parse_mode=ParseMode.HTML, reply_markup=self.cancel_menu())
-            return
-        if text == MENU["unwatch"]:
-            context.chat_data["pending"] = PendingInput("unwatch")
-            await update.effective_message.reply_text("Отправь адрес кошелька для удаления.", reply_markup=self.cancel_menu())
-            return
-
-        if text in {MENU["score"], MENU["holdings"], MENU["cluster"], MENU["findbytoken"]}:
-            action = {
-                MENU["score"]: "score",
-                MENU["holdings"]: "holdings",
-                MENU["cluster"]: "cluster",
-                MENU["findbytoken"]: "findbytoken",
-            }[text]
-            context.chat_data["pending"] = PendingInput(action)
-            await update.effective_message.reply_text("Отправь Solana-адрес.", reply_markup=self.cancel_menu())
-            return
-
-        if text.startswith("/"):
+        ask = {
+            MENU["watch"]: "watch",
+            MENU["unwatch"]: "unwatch",
+            MENU["score"]: "score",
+            MENU["holdings"]: "holdings",
+            MENU["cluster"]: "cluster",
+            MENU["findbytoken"]: "findbytoken",
+        }
+        if text in ask:
+            context.chat_data["pending"] = PendingInput(ask[text])
+            prompt = {
+                "watch": "Отправь: <code>address name</code>",
+                "unwatch": "Отправь адрес для удаления.",
+                "score": "Отправь адрес кошелька для score.",
+                "holdings": "Отправь адрес кошелька для holdings.",
+                "cluster": "Отправь seed-адрес для cluster.",
+                "findbytoken": "Отправь mint токена.",
+            }[ask[text]]
+            await update.effective_message.reply_text(prompt, parse_mode=ParseMode.HTML, reply_markup=self.cancel_menu())
             return
 
         await update.effective_message.reply_text("Используй меню или /help", reply_markup=self.main_menu())
 
-    async def _handle_stub_action(self, update: Update, action: str, value: str) -> None:
-        if not self._is_address(value):
-            await update.effective_message.reply_text("Это не похоже на валидный Solana-адрес.")
+    async def _show_score(self, update: Update, address: str) -> None:
+        if not self._is_address(address):
+            await update.effective_message.reply_text("Невалидный Solana-адрес.")
             return
-        await update.effective_message.reply_text(
-            f"Команда {action} получена для <code>{value}</code>.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=self.main_menu(),
-        )
+        report = self.services.wallet_analyzer.analyze_wallet(address)
+        lines = [
+            "<b>Wallet score</b>",
+            f"Address: <code>{address}</code>",
+            f"Score: <b>{report['score']}/100</b>",
+            f"WinRate: {report['win_rate']}%",
+            f"All-time PnL: ${report['all_time_pnl_usd']}",
+            f"Trades: {report['trade_count']}",
+            f"Profiles: {', '.join(report['profiles'])}",
+        ]
+        await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=self.main_menu())
 
-    async def _address_stub(self, update: Update, context: ContextTypes.DEFAULT_TYPE, action: str) -> None:
-        if context.args:
-            await self._handle_stub_action(update, action, context.args[0])
+    async def _show_holdings(self, update: Update, address: str) -> None:
+        if not self._is_address(address):
+            await update.effective_message.reply_text("Невалидный Solana-адрес.")
             return
-        context.chat_data["pending"] = PendingInput(action)
-        await update.effective_message.reply_text("Отправь Solana-адрес.", reply_markup=self.cancel_menu())
+        holdings = self.services.wallet_analyzer.get_current_holdings(address)
+        lines = [f"<b>Holdings</b> <code>{address}</code>"]
+        for item in holdings:
+            lines.append(f"• {item['symbol']} — ${item['usd_value']} ({item['amount']})")
+        await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=self.main_menu())
+
+    async def _show_cluster(self, update: Update, address: str) -> None:
+        if not self._is_address(address):
+            await update.effective_message.reply_text("Невалидный Solana-адрес.")
+            return
+        cluster = self.services.cluster_analyzer.analyze(address)
+        text = (
+            "<b>Cluster</b>\n"
+            f"Seed: <code>{cluster['seed']}</code>\n"
+            f"Suspicion: <b>{cluster['suspicion_score']}/100</b>\n"
+            f"Nodes: {cluster['node_count']} | Edges: {cluster['edge_count']}"
+        )
+        await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=self.main_menu())
+
+    async def _show_token_whales(self, update: Update, mint: str) -> None:
+        if not self._is_address(mint):
+            await update.effective_message.reply_text("Невалидный mint-адрес.")
+            return
+        result = self.services.whale_finder.find_whales_by_token(mint)
+        lines = [
+            "<b>Whales by token</b>",
+            f"Mint: <code>{mint}</code>",
+            f"Scanned: {result['scanned_wallets']}",
+        ]
+        for i, w in enumerate(result["whales"][:10], start=1):
+            lines.append(f"{i}. <code>{w['address']}</code> score {w['score']} pnl ${w['all_time_pnl_usd']}")
+        await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=self.main_menu())
 
     async def _add_watch(self, update: Update, address: str, name: str) -> None:
         if not self._is_address(address):
             await update.effective_message.reply_text("Невалидный Solana-адрес.")
             return
-        entry = self.storage.add_watch(update.effective_chat.id, address, name)
-        await update.effective_message.reply_text(
-            f"Добавлено: <code>{entry['address']}</code> ({entry['name']})",
-            parse_mode=ParseMode.HTML,
-            reply_markup=self.main_menu(),
-        )
+        entry = self.services.tracker.add_watch(update.effective_chat.id, address, name)
+        await update.effective_message.reply_text(f"Добавлено: <code>{entry['address']}</code> ({entry['name']})", parse_mode=ParseMode.HTML, reply_markup=self.main_menu())
 
     async def _remove_watch(self, update: Update, address: str) -> None:
         if not self._is_address(address):
             await update.effective_message.reply_text("Невалидный Solana-адрес.")
             return
-        ok = self.storage.remove_watch(update.effective_chat.id, address)
-        text = "Удалено из вотчлиста." if ok else "Адрес не найден в вотчлисте."
-        await update.effective_message.reply_text(text, reply_markup=self.main_menu())
+        ok = self.services.tracker.remove_watch(update.effective_chat.id, address)
+        await update.effective_message.reply_text("Удалено из вотчлиста." if ok else "Адрес не найден.", reply_markup=self.main_menu())
 
     @staticmethod
     def _is_address(value: str) -> bool:
@@ -248,15 +297,18 @@ class WhaleBot:
             "/watch &lt;address&gt; &lt;name&gt;\n"
             "/unwatch &lt;address&gt;\n"
             "/list\n"
-            "/score &lt;address&gt;, /holdings &lt;address&gt;, /cluster &lt;address&gt;\n"
-            "/findwhales, /findbytoken &lt;mint&gt;\n\n"
+            "/score &lt;address&gt;\n"
+            "/holdings &lt;address&gt;\n"
+            "/cluster &lt;address&gt;\n"
+            "/findwhales\n"
+            "/findbytoken &lt;mint&gt;\n\n"
             "Можно работать полностью кнопками в Telegram."
         )
 
 
-def build_application(settings: Settings, storage: JsonStorage) -> Application:
-    bot = WhaleBot(settings, storage)
-    app = Application.builder().token(settings.telegram_token).build()
+def build_application(services: Services, token: str) -> Application:
+    bot = WhaleBot(services)
+    app = Application.builder().token(token).build()
 
     app.add_handler(CommandHandler("start", bot.start))
     app.add_handler(CommandHandler("help", bot.help))
@@ -271,5 +323,4 @@ def build_application(settings: Settings, storage: JsonStorage) -> Application:
     app.add_handler(CommandHandler("findwhales", bot.findwhales))
     app.add_handler(CommandHandler("findbytoken", bot.findbytoken))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.text_router))
-
     return app

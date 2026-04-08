@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-from .bot import build_application
+from .bot import Services, build_application
+from .cluster_analyzer import ClusterAnalyzer
 from .config import get_settings
+from .helius import HeliusClient
 from .storage import JsonStorage
+from .wallet_analyzer import WalletAnalyzer
+from .whale_finder import WhaleFinder
+from .whale_tracker import WhaleTracker
 
 
 def main() -> None:
@@ -11,7 +16,21 @@ def main() -> None:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
 
     storage = JsonStorage(settings.data_dir)
-    app = build_application(settings, storage)
+    helius = HeliusClient(settings.helius_api_key)
+    wallet_analyzer = WalletAnalyzer()
+    whale_finder = WhaleFinder(wallet_analyzer)
+    cluster_analyzer = ClusterAnalyzer(wallet_analyzer)
+    tracker = WhaleTracker(storage)
+
+    services = Services(
+        helius=helius,
+        wallet_analyzer=wallet_analyzer,
+        whale_finder=whale_finder,
+        cluster_analyzer=cluster_analyzer,
+        tracker=tracker,
+    )
+
+    app = build_application(services, settings.telegram_token)
     app.run_polling(drop_pending_updates=True)
 
 
