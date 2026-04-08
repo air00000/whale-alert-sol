@@ -18,7 +18,7 @@ def main() -> None:
     storage = JsonStorage(settings.data_dir)
     helius = HeliusClient(settings.helius_api_key)
     wallet_analyzer = WalletAnalyzer()
-    whale_finder = WhaleFinder(wallet_analyzer)
+    whale_finder = WhaleFinder(helius=helius, wallet_analyzer=wallet_analyzer, dev_wallets=set(settings.dev_wallets))
     cluster_analyzer = ClusterAnalyzer(wallet_analyzer)
     tracker = WhaleTracker(storage)
 
@@ -28,6 +28,7 @@ def main() -> None:
         whale_finder=whale_finder,
         cluster_analyzer=cluster_analyzer,
         tracker=tracker,
+        scan_interval_sec=settings.scan_interval_sec,
     )
 
     app = build_application(services, settings.telegram_token)

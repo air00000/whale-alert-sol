@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -27,6 +28,7 @@ MENU = {
     "cluster": "🕸️ Кластер",
     "findwhales": "🐋 Найти китов",
     "findbytoken": "🪙 Киты по токену",
+    "stop": "⏹️ Стоп поиск",
     "cancel": "❌ Отмена",
 }
 
@@ -43,11 +45,13 @@ class Services:
     whale_finder: WhaleFinder
     cluster_analyzer: ClusterAnalyzer
     tracker: WhaleTracker
+    scan_interval_sec: int
 
 
 class WhaleBot:
     def __init__(self, services: Services) -> None:
         self.services = services
+        self.search_tasks: dict[int, asyncio.Task] = {}
 
     @staticmethod
     def main_menu() -> ReplyKeyboardMarkup:
@@ -56,7 +60,7 @@ class WhaleBot:
                 [MENU["help"], MENU["status"], MENU["list"]],
                 [MENU["watch"], MENU["unwatch"]],
                 [MENU["score"], MENU["holdings"], MENU["cluster"]],
-                [MENU["findwhales"], MENU["findbytoken"]],
+                [MENU["findwhales"], MENU["findbytoken"], MENU["stop"]],
             ],
             resize_keyboard=True,
         )
@@ -136,24 +140,20 @@ class WhaleBot:
 
     async def findbytoken(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if context.args:
-            await self._show_token_whales(update, context.args[0])
+            await self._start_token_search(update, context.args[0])
             return
         context.chat_data["pending"] = PendingInput("findbytoken")
         await update.effective_message.reply_text("Отправь mint токена.", reply_markup=self.cancel_menu())
 
     async def findwhales(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        result = self.services.whale_finder.find_whales()
-        whales = result["whales"]
-        lines = [
-            "<b>Whale scan</b>",
-            f"Scanned wallets: {result['scanned_wallets']}",
-            f"Filters: winRate>={result['filters']['min_win_rate']} pnl>={result['filters']['min_pnl_usd']}"
-        ]
-        if not whales:
-            lines.append("По текущим фильтрам китов не найдено.")
-        for i, w in enumerate(whales[:10], start=1):
-            lines.append(f"{i}. <code>{w['address']}</code> | score {w['score']} | winRate {w['win_rate']}% | pnl ${w['all_time_pnl_usd']}")
-        await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=self.main_menu())
+        await self._start_global_search(update)
+
+    async def stopsearch(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        chat_id = update.effective_chat.id
+        if self._cancel_search(chat_id):
+            await update.effective_message.reply_text("Поиск остановлен.", reply_markup=self.main_menu())
+        else:
+            await update.effective_message.reply_text("Активного поиска нет.", reply_markup=self.main_menu())
 
     async def text_router(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = (update.effective_message.text or "").strip()
@@ -180,7 +180,7 @@ class WhaleBot:
             elif pending.action == "cluster":
                 await self._show_cluster(update, text)
             elif pending.action == "findbytoken":
-                await self._show_token_whales(update, text)
+                await self._start_token_search(update, text)
 
             context.chat_data.pop("pending", None)
             return
@@ -190,6 +190,7 @@ class WhaleBot:
             MENU["status"]: self.status,
             MENU["list"]: self.list_watch,
             MENU["findwhales"]: self.findwhales,
+            MENU["stop"]: self.stopsearch,
         }
         if text in direct:
             await direct[text](update, context)
@@ -202,8 +203,12 @@ class WhaleBot:
             MENU["holdings"]: "holdings",
             MENU["cluster"]: "cluster",
             MENU["findbytoken"]: "findbytoken",
+            MENU["stop"]: "stopsearch",
         }
         if text in ask:
+            if ask[text] == "stopsearch":
+                await self.stopsearch(update, context)
+                return
             context.chat_data["pending"] = PendingInput(ask[text])
             prompt = {
                 "watch": "Отправь: <code>address name</code>",
@@ -269,7 +274,61 @@ class WhaleBot:
         ]
         for i, w in enumerate(result["whales"][:10], start=1):
             lines.append(f"{i}. <code>{w['address']}</code> score {w['score']} pnl ${w['all_time_pnl_usd']}")
+        for note in result.get("notes", []):
+            lines.append(f"• {note}")
         await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=self.main_menu())
+
+    async def _start_global_search(self, update: Update) -> None:
+        chat_id = update.effective_chat.id
+        self._cancel_search(chat_id)
+        await update.effective_message.reply_text(
+            f"Запустил непрерывный поиск китов. Интервал: {self.services.scan_interval_sec} сек.\nОстановить: /stopsearch или кнопка «{MENU['stop']}».",
+            reply_markup=self.main_menu(),
+        )
+
+        async def runner() -> None:
+            while True:
+                result = self.services.whale_finder.find_whales()
+                lines = [f"<b>Whale scan update</b> | scanned: {result['scanned_wallets']}"]
+                whales = result.get("whales", [])
+                if whales:
+                    for i, w in enumerate(whales[:10], start=1):
+                        lines.append(f"{i}. <code>{w['address']}</code> score {w['score']} pnl ${w['all_time_pnl_usd']}")
+                else:
+                    lines.append("Пока нет валидных кандидатов.")
+                for note in result.get("notes", []):
+                    lines.append(f"• {note}")
+                await update.get_bot().send_message(chat_id, "\n".join(lines), parse_mode=ParseMode.HTML)
+                await asyncio.sleep(self.services.scan_interval_sec)
+
+        self.search_tasks[chat_id] = asyncio.create_task(runner())
+
+    async def _start_token_search(self, update: Update, mint: str) -> None:
+        if not self._is_address(mint):
+            await update.effective_message.reply_text("Невалидный mint-адрес.")
+            return
+        chat_id = update.effective_chat.id
+        self._cancel_search(chat_id)
+        await update.effective_message.reply_text(
+            f"Запустил непрерывный поиск китов по токену <code>{mint}</code>. Интервал: {self.services.scan_interval_sec} сек.\nОстановить: /stopsearch или кнопка «{MENU['stop']}».",
+            parse_mode=ParseMode.HTML,
+            reply_markup=self.main_menu(),
+        )
+
+        async def runner() -> None:
+            while True:
+                result = self.services.whale_finder.find_whales_by_token(mint)
+                lines = [f"<b>Token whale update</b> <code>{mint}</code> | scanned: {result['scanned_wallets']}"]
+                for i, w in enumerate(result.get("whales", [])[:10], start=1):
+                    lines.append(f"{i}. <code>{w['address']}</code> score {w['score']} pnl ${w['all_time_pnl_usd']}")
+                if not result.get("whales"):
+                    lines.append("Пока нет валидных кандидатов.")
+                for note in result.get("notes", []):
+                    lines.append(f"• {note}")
+                await update.get_bot().send_message(chat_id, "\n".join(lines), parse_mode=ParseMode.HTML)
+                await asyncio.sleep(self.services.scan_interval_sec)
+
+        self.search_tasks[chat_id] = asyncio.create_task(runner())
 
     async def _add_watch(self, update: Update, address: str, name: str) -> None:
         if not self._is_address(address):
@@ -289,6 +348,13 @@ class WhaleBot:
     def _is_address(value: str) -> bool:
         return bool(ADDRESS_RE.match((value or "").strip()))
 
+    def _cancel_search(self, chat_id: int) -> bool:
+        task = self.search_tasks.pop(chat_id, None)
+        if not task:
+            return False
+        task.cancel()
+        return True
+
     @staticmethod
     def help_text() -> str:
         return (
@@ -302,6 +368,7 @@ class WhaleBot:
             "/cluster &lt;address&gt;\n"
             "/findwhales\n"
             "/findbytoken &lt;mint&gt;\n\n"
+            "/stopsearch\n\n"
             "Можно работать полностью кнопками в Telegram."
         )
 
@@ -322,5 +389,6 @@ def build_application(services: Services, token: str) -> Application:
     app.add_handler(CommandHandler("cluster", bot.cluster))
     app.add_handler(CommandHandler("findwhales", bot.findwhales))
     app.add_handler(CommandHandler("findbytoken", bot.findbytoken))
+    app.add_handler(CommandHandler("stopsearch", bot.stopsearch))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.text_router))
     return app

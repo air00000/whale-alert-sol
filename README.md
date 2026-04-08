@@ -56,6 +56,13 @@ TELEGRAM_BOT_TOKEN=...
 HELIUS_API_KEY=...
 ```
 
+Опционально:
+
+```env
+SCAN_INTERVAL_SEC=60
+DEV_WALLETS=wallet1,wallet2,wallet3
+```
+
 ### 3) Запуск
 
 ```bash
@@ -79,6 +86,7 @@ python -m pybot.main
 /cluster <address>
 /findwhales
 /findbytoken <mint>
+/stopsearch
 ```
 
 После `/start` можно работать полностью через кнопки в самом Telegram.
