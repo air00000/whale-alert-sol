@@ -816,6 +816,29 @@ class TelegramBotApp {
       await next();
     });
 
+    for (const [command, handler] of commandHandlers.entries()) {
+      this.bot.command(command, async (ctx) => {
+        ctx.state = ctx.state || {};
+        ctx.state.commandHandled = true;
+
+        const rawText = String(ctx.message?.text || '').trim();
+        const parsed = parseCommand(rawText);
+        const args = parsed?.args || [];
+
+        this.setRuntimeStatus({
+          lastCommand: `/${command}`,
+          lastCommandAt: new Date().toISOString()
+        });
+
+        try {
+          await handler(ctx, args);
+        } catch (error) {
+          console.error(`[telegram] command /${command} failed:`, error);
+          await this.safeReply(ctx, `Command failed: ${escapeHtml(extractErrorMessage(error))}`);
+        }
+      });
+    }
+
     this.bot.on('message:text', async (ctx) => {
       if (ctx.state?.commandHandled) return;
 
