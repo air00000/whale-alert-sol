@@ -85,18 +85,26 @@ function isLikelySolanaAddress(value) {
 }
 
 const TELEGRAM_MENU_BUTTONS = Object.freeze({
-  help: 'ℹ️ Help',
-  status: '📊 Status',
-  list: '📋 Watchlist',
-  findWhales: '🐋 Find whales',
-  findByToken: '🪙 Whales by token',
-  score: '🧠 Wallet score',
-  holdings: '💼 Holdings',
-  cluster: '🕸️ Cluster',
-  watch: '👀 Watch wallet',
-  unwatch: '🗑️ Unwatch wallet',
-  cancel: '❌ Cancel'
+  help: 'ℹ️ Помощь',
+  status: '📊 Статус',
+  list: '📋 Вотчлист',
+  findWhales: '🐋 Найти китов',
+  findByToken: '🪙 Киты по токену',
+  score: '🧠 Скор кошелька',
+  holdings: '💼 Холдинги',
+  cluster: '🕸️ Кластер',
+  watch: '👀 Отслеживать',
+  unwatch: '🗑️ Убрать из вотчлиста',
+  cancel: '❌ Отмена'
 });
+
+function normalizeMenuText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, '')
+    .trim();
+}
 
 function parseCommand(text) {
   const trimmed = String(text || '').trim();
@@ -668,19 +676,31 @@ class TelegramBotApp {
   }
 
   getMenuCommandByText(text) {
-    const normalized = String(text || '').trim();
+    const normalized = normalizeMenuText(text);
     const mapping = new Map([
-      [TELEGRAM_MENU_BUTTONS.help, { type: 'command', command: 'help', args: [] }],
-      [TELEGRAM_MENU_BUTTONS.status, { type: 'command', command: 'status', args: [] }],
-      [TELEGRAM_MENU_BUTTONS.list, { type: 'command', command: 'list', args: [] }],
-      [TELEGRAM_MENU_BUTTONS.findWhales, { type: 'command', command: 'findwhales', args: [] }],
-      [TELEGRAM_MENU_BUTTONS.findByToken, { type: 'input', action: 'findbytoken', prompt: 'Отправь mint токена (адрес Solana).' }],
-      [TELEGRAM_MENU_BUTTONS.score, { type: 'input', action: 'score', prompt: 'Отправь адрес кошелька для анализа score.' }],
-      [TELEGRAM_MENU_BUTTONS.holdings, { type: 'input', action: 'holdings', prompt: 'Отправь адрес кошелька для запроса holdings.' }],
-      [TELEGRAM_MENU_BUTTONS.cluster, { type: 'input', action: 'cluster', prompt: 'Отправь seed-адрес кошелька для cluster-анализа.' }],
-      [TELEGRAM_MENU_BUTTONS.watch, { type: 'input', action: 'watch', prompt: 'Отправь данные в формате:\n<code>address name</code>' }],
-      [TELEGRAM_MENU_BUTTONS.unwatch, { type: 'input', action: 'unwatch', prompt: 'Отправь адрес кошелька, который нужно убрать из watchlist.' }],
-      [TELEGRAM_MENU_BUTTONS.cancel, { type: 'cancel' }]
+      [normalizeMenuText(TELEGRAM_MENU_BUTTONS.help), { type: 'command', command: 'help', args: [] }],
+      [normalizeMenuText(TELEGRAM_MENU_BUTTONS.status), { type: 'command', command: 'status', args: [] }],
+      [normalizeMenuText(TELEGRAM_MENU_BUTTONS.list), { type: 'command', command: 'list', args: [] }],
+      [normalizeMenuText(TELEGRAM_MENU_BUTTONS.findWhales), { type: 'command', command: 'findwhales', args: [] }],
+      [normalizeMenuText(TELEGRAM_MENU_BUTTONS.findByToken), { type: 'input', action: 'findbytoken', prompt: 'Отправь mint токена (адрес Solana).' }],
+      [normalizeMenuText(TELEGRAM_MENU_BUTTONS.score), { type: 'input', action: 'score', prompt: 'Отправь адрес кошелька для анализа score.' }],
+      [normalizeMenuText(TELEGRAM_MENU_BUTTONS.holdings), { type: 'input', action: 'holdings', prompt: 'Отправь адрес кошелька для запроса holdings.' }],
+      [normalizeMenuText(TELEGRAM_MENU_BUTTONS.cluster), { type: 'input', action: 'cluster', prompt: 'Отправь seed-адрес кошелька для cluster-анализа.' }],
+      [normalizeMenuText(TELEGRAM_MENU_BUTTONS.watch), { type: 'input', action: 'watch', prompt: 'Отправь данные в формате:\n<code>address name</code>' }],
+      [normalizeMenuText(TELEGRAM_MENU_BUTTONS.unwatch), { type: 'input', action: 'unwatch', prompt: 'Отправь адрес кошелька, который нужно убрать из watchlist.' }],
+      [normalizeMenuText(TELEGRAM_MENU_BUTTONS.cancel), { type: 'cancel' }],
+      ['help', { type: 'command', command: 'help', args: [] }],
+      ['status', { type: 'command', command: 'status', args: [] }],
+      ['watchlist', { type: 'command', command: 'list', args: [] }],
+      ['find whales', { type: 'command', command: 'findwhales', args: [] }],
+      ['whales by token', { type: 'input', action: 'findbytoken', prompt: 'Send token mint address.' }],
+      ['wallet score', { type: 'input', action: 'score', prompt: 'Send wallet address for scoring.' }],
+      ['holdings', { type: 'input', action: 'holdings', prompt: 'Send wallet address for holdings lookup.' }],
+      ['cluster', { type: 'input', action: 'cluster', prompt: 'Send seed wallet for cluster analysis.' }],
+      ['watch wallet', { type: 'input', action: 'watch', prompt: 'Send data in format:\n<code>address name</code>' }],
+      ['unwatch wallet', { type: 'input', action: 'unwatch', prompt: 'Send wallet address to remove from watchlist.' }],
+      ['cancel', { type: 'cancel' }],
+      ['отмена', { type: 'cancel' }]
     ]);
     return mapping.get(normalized) || null;
   }
@@ -689,7 +709,8 @@ class TelegramBotApp {
     const state = this.getChatInputState(ctx.chat?.id);
     if (!state) return false;
 
-    if (String(text || '').trim() === TELEGRAM_MENU_BUTTONS.cancel) {
+    const normalizedText = normalizeMenuText(text);
+    if (normalizedText === normalizeMenuText(TELEGRAM_MENU_BUTTONS.cancel) || normalizedText === 'cancel' || normalizedText === 'отмена') {
       this.setChatInputState(ctx.chat?.id, null);
       await this.safeReply(ctx, 'Действие отменено.', {
         reply_markup: this.getMainMenuKeyboard()
