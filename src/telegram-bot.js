@@ -84,6 +84,20 @@ function isLikelySolanaAddress(value) {
   return /^[1-9A-HJ-NP-Za-km-z]{32,48}$/.test(String(value || '').trim());
 }
 
+const TELEGRAM_MENU_BUTTONS = Object.freeze({
+  help: 'ℹ️ Help',
+  status: '📊 Status',
+  list: '📋 Watchlist',
+  findWhales: '🐋 Find whales',
+  findByToken: '🪙 Whales by token',
+  score: '🧠 Wallet score',
+  holdings: '💼 Holdings',
+  cluster: '🕸️ Cluster',
+  watch: '👀 Watch wallet',
+  unwatch: '🗑️ Unwatch wallet',
+  cancel: '❌ Cancel'
+});
+
 function parseCommand(text) {
   const trimmed = String(text || '').trim();
   if (!trimmed.startsWith('/')) return null;
@@ -133,6 +147,7 @@ class TelegramBotApp {
     };
 
     this.pollingPromise = null;
+    this.chatInputState = new Map();
     this.bot = new Bot(this.config.telegram.botToken);
     this.registerHandlers();
   }
@@ -159,6 +174,43 @@ class TelegramBotApp {
     for (const chunk of chunkText(text)) {
       await this.safeReply(ctx, chunk);
     }
+  }
+
+  getMainMenuKeyboard() {
+    return {
+      keyboard: [
+        [TELEGRAM_MENU_BUTTONS.help, TELEGRAM_MENU_BUTTONS.status, TELEGRAM_MENU_BUTTONS.list],
+        [TELEGRAM_MENU_BUTTONS.findWhales, TELEGRAM_MENU_BUTTONS.findByToken],
+        [TELEGRAM_MENU_BUTTONS.score, TELEGRAM_MENU_BUTTONS.holdings, TELEGRAM_MENU_BUTTONS.cluster],
+        [TELEGRAM_MENU_BUTTONS.watch, TELEGRAM_MENU_BUTTONS.unwatch]
+      ],
+      resize_keyboard: true
+    };
+  }
+
+  getCancelKeyboard() {
+    return {
+      keyboard: [[TELEGRAM_MENU_BUTTONS.cancel]],
+      resize_keyboard: true,
+      one_time_keyboard: true
+    };
+  }
+
+  setChatInputState(chatId, state = null) {
+    if (!chatId) return;
+    if (!state) {
+      this.chatInputState.delete(chatId);
+      return;
+    }
+    this.chatInputState.set(chatId, {
+      ...state,
+      setAt: new Date().toISOString()
+    });
+  }
+
+  getChatInputState(chatId) {
+    if (!chatId) return null;
+    return this.chatInputState.get(chatId) || null;
   }
 
   walletLink(address, label = null) {
@@ -453,11 +505,15 @@ class TelegramBotApp {
   }
 
   async handleStart(ctx) {
-    await this.replyLong(ctx, this.formatHelp());
+    await this.safeReply(ctx, this.formatHelp(), {
+      reply_markup: this.getMainMenuKeyboard()
+    });
   }
 
   async handleHelp(ctx) {
-    await this.replyLong(ctx, this.formatHelp());
+    await this.safeReply(ctx, this.formatHelp(), {
+      reply_markup: this.getMainMenuKeyboard()
+    });
   }
 
   async handlePing(ctx) {
@@ -604,6 +660,88 @@ class TelegramBotApp {
     }
   }
 
+  async promptForInput(ctx, prompt, state) {
+    this.setChatInputState(ctx.chat?.id, state);
+    await this.safeReply(ctx, prompt, {
+      reply_markup: this.getCancelKeyboard()
+    });
+  }
+
+  getMenuCommandByText(text) {
+    const normalized = String(text || '').trim();
+    const mapping = new Map([
+      [TELEGRAM_MENU_BUTTONS.help, { type: 'command', command: 'help', args: [] }],
+      [TELEGRAM_MENU_BUTTONS.status, { type: 'command', command: 'status', args: [] }],
+      [TELEGRAM_MENU_BUTTONS.list, { type: 'command', command: 'list', args: [] }],
+      [TELEGRAM_MENU_BUTTONS.findWhales, { type: 'command', command: 'findwhales', args: [] }],
+      [TELEGRAM_MENU_BUTTONS.findByToken, { type: 'input', action: 'findbytoken', prompt: 'Отправь mint токена (адрес Solana).' }],
+      [TELEGRAM_MENU_BUTTONS.score, { type: 'input', action: 'score', prompt: 'Отправь адрес кошелька для анализа score.' }],
+      [TELEGRAM_MENU_BUTTONS.holdings, { type: 'input', action: 'holdings', prompt: 'Отправь адрес кошелька для запроса holdings.' }],
+      [TELEGRAM_MENU_BUTTONS.cluster, { type: 'input', action: 'cluster', prompt: 'Отправь seed-адрес кошелька для cluster-анализа.' }],
+      [TELEGRAM_MENU_BUTTONS.watch, { type: 'input', action: 'watch', prompt: 'Отправь данные в формате:\n<code>address name</code>' }],
+      [TELEGRAM_MENU_BUTTONS.unwatch, { type: 'input', action: 'unwatch', prompt: 'Отправь адрес кошелька, который нужно убрать из watchlist.' }],
+      [TELEGRAM_MENU_BUTTONS.cancel, { type: 'cancel' }]
+    ]);
+    return mapping.get(normalized) || null;
+  }
+
+  async handlePendingInput(ctx, text) {
+    const state = this.getChatInputState(ctx.chat?.id);
+    if (!state) return false;
+
+    if (String(text || '').trim() === TELEGRAM_MENU_BUTTONS.cancel) {
+      this.setChatInputState(ctx.chat?.id, null);
+      await this.safeReply(ctx, 'Действие отменено.', {
+        reply_markup: this.getMainMenuKeyboard()
+      });
+      return true;
+    }
+
+    const handlers = this.getCommandHandlers();
+    const raw = String(text || '').trim();
+    let done = false;
+
+    try {
+      switch (state.action) {
+        case 'findbytoken':
+        case 'score':
+        case 'holdings':
+        case 'cluster':
+        case 'unwatch': {
+          if (!isLikelySolanaAddress(raw)) {
+            await this.safeReply(ctx, 'Это не похоже на валидный Solana address. Попробуй ещё раз или нажми ❌ Cancel.');
+            return true;
+          }
+          await handlers.get(state.action)(ctx, [raw]);
+          done = true;
+          break;
+        }
+        case 'watch': {
+          const [address, ...nameParts] = raw.split(/\s+/).filter(Boolean);
+          if (!isLikelySolanaAddress(address)) {
+            await this.safeReply(ctx, 'Нужен валидный адрес в формате <code>address name</code>.');
+            return true;
+          }
+          await handlers.get('watch')(ctx, [address, ...nameParts]);
+          done = true;
+          break;
+        }
+        default:
+          await this.safeReply(ctx, 'Неизвестный тип ожидаемого ввода. Попробуй снова через меню.');
+          done = true;
+      }
+    } finally {
+      if (done) {
+        this.setChatInputState(ctx.chat?.id, null);
+        await this.safeReply(ctx, 'Готово. Выбери следующее действие в меню 👇', {
+          reply_markup: this.getMainMenuKeyboard()
+        });
+      }
+    }
+
+    return true;
+  }
+
   getCommandHandlers() {
     return new Map([
       ['start', this.handleStart.bind(this)],
@@ -662,6 +800,35 @@ class TelegramBotApp {
 
       const text = String(ctx.message?.text || '').trim();
       if (!text || ctx.from?.is_bot) return;
+
+      if (await this.handlePendingInput(ctx, text)) {
+        return;
+      }
+
+      const menuAction = this.getMenuCommandByText(text);
+      if (menuAction) {
+        if (menuAction.type === 'cancel') {
+          this.setChatInputState(ctx.chat?.id, null);
+          await this.safeReply(ctx, 'Нечего отменять. Выбери действие в меню 👇', {
+            reply_markup: this.getMainMenuKeyboard()
+          });
+          return;
+        }
+
+        if (menuAction.type === 'input') {
+          await this.promptForInput(ctx, menuAction.prompt, { action: menuAction.action });
+          return;
+        }
+
+        if (menuAction.type === 'command') {
+          const handlers = this.getCommandHandlers();
+          const handler = handlers.get(menuAction.command);
+          if (handler) {
+            await handler(ctx, menuAction.args || []);
+          }
+          return;
+        }
+      }
 
       const parsed = parseCommand(text);
       if (!parsed) {
